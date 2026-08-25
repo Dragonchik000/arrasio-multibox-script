@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Arras.io Multibox Bot Pro
 // @namespace    http://tampermonkey.net/
-// @version      3.0
-// @description  Advanced multibox script with auto-attack, auto-pilot, auto-build, host sync
+// @version      3.1
+// @description  Advanced multibox script with proxy support and auto-attack, auto-pilot, auto-build
 // @author       Dragonchik000
 // @match        https://arras.io/*
 // @run-at       document-start
@@ -10,11 +10,29 @@
 // @grant        GM_setValue
 // @grant        GM_addStyle
 // @grant        unsafeWindow
-// @connect      idcraw.lol
+// @grant        GM_xmlhttpRequest
+// @connect      dc.de-pr.plainproxies.com
 // ==/UserScript==
 
 (function() {
     'use strict';
+
+    // ==================== PROXY CONFIG ====================
+    window.PROXY_CONFIG = {
+        ENABLED: true,
+        PRIMARY: {
+            host: 'dc.de-pr.plainproxies.com',
+            port: 1338,
+            username: 'DC_B06Tf3XfXR-ttl-0',
+            password: 'FQ0s56phl8LSgtI'
+        },
+        BACKUPS: [
+            // Add backup proxies here
+        ],
+        ROTATION: true,
+        CURRENT_INDEX: 0,
+        CONNECTION_TIMEOUT: 5000
+    };
 
     // ==================== GLOBAL CONFIG ====================
     window.ARRAS_CONFIG = {
@@ -25,6 +43,7 @@
         FOLLOW_MOUSE: GM_getValue('follow_mouse', true),
         SYNC_ENABLED: GM_getValue('sync_enabled', true),
         FOLLOW_HOST: GM_getValue('follow_host', true),
+        USE_PROXY: GM_getValue('use_proxy', true),
         
         // Параметры
         SYNC_INTERVAL: 50,
@@ -48,25 +67,138 @@
         score: 0,
         isAlive: true,
         tankType: 'Basic',
-        upgrades: {}
+        upgrades: {},
+        proxyStatus: 'disconnected'
     };
+
+    // ==================== PROXY MANAGER ====================
+    class ProxyManager {
+        constructor() {
+            this.proxies = [PROXY_CONFIG.PRIMARY, ...PROXY_CONFIG.BACKUPS];
+            this.currentProxy = this.proxies[0];
+            this.isConnected = false;
+            this.connectionAttempts = 0;
+            this.maxRetries = 3;
+        }
+
+        getCurrentProxy() {
+            if (!PROXY_CONFIG.ROTATION) {
+                return this.proxies[0];
+            }
+            return this.proxies[PROXY_CONFIG.CURRENT_INDEX % this.proxies.length];
+        }
+
+        rotateProxy() {
+            PROXY_CONFIG.CURRENT_INDEX++;
+            this.currentProxy = this.getCurrentProxy();
+            console.log(`[Proxy] Ротация прокси (${PROXY_CONFIG.CURRENT_INDEX}):`, this.currentProxy.host);
+        }
+
+        getProxyURL() {
+            const proxy = this.getCurrentProxy();
+            return `http://${proxy.username}:${proxy.password}@${proxy.host}:${proxy.port}`;
+        }
+
+        getProxyString() {
+            const proxy = this.getCurrentProxy();
+            return `${proxy.host}:${proxy.port}:${proxy.username}:${proxy.password}`;
+        }
+
+        async testConnection() {
+            return new Promise((resolve) => {
+                const proxy = this.getCurrentProxy();
+                const timeout = setTimeout(() => {
+                    console.log('[Proxy] Timeout подключения');
+                    ARRAS_STATE.proxyStatus = 'timeout';
+                    resolve(false);
+                }, PROXY_CONFIG.CONNECTION_TIMEOUT);
+
+                try {
+                    GM_xmlhttpRequest({
+                        method: 'GET',
+                        url: 'https://api.ipify.org?format=json',
+                        timeout: PROXY_CONFIG.CONNECTION_TIMEOUT,
+                        onload: (response) => {
+                            clearTimeout(timeout);
+                            console.log('[Proxy] ✅ Подключено:', response.responseText);
+                            ARRAS_STATE.proxyStatus = 'connected';
+                            this.isConnected = true;
+                            this.connectionAttempts = 0;
+                            resolve(true);
+                        },
+                        onerror: () => {
+                            clearTimeout(timeout);
+                            console.log('[Proxy] ❌ Ошибка подключения');
+                            ARRAS_STATE.proxyStatus = 'error';
+                            this.connectionAttempts++;
+                            resolve(false);
+                        }
+                    });
+                } catch(e) {
+                    clearTimeout(timeout);
+                    console.error('[Proxy] Ошибка при тестировании:', e);
+                    ARRAS_STATE.proxyStatus = 'error';
+                    resolve(false);
+                }
+            });
+        }
+
+        async connect() {
+            console.log('[Proxy] Попытка подключения...');
+            
+            for (let i = 0; i < this.maxRetries; i++) {
+                const connected = await this.testConnection();
+                if (connected) {
+                    return true;
+                }
+                
+                // Попробовать следующий прокси
+                if (i < this.maxRetries - 1) {
+                    this.rotateProxy();
+                    await this.delay(1000);
+                }
+            }
+            
+            console.error('[Proxy] Не удалось подключиться');
+            ARRAS_STATE.proxyStatus = 'failed';
+            return false;
+        }
+
+        delay(ms) {
+            return new Promise(resolve => setTimeout(resolve, ms));
+        }
+
+        addProxy(host, port, username, password) {
+            const newProxy = { host, port, username, password };
+            this.proxies.push(newProxy);
+            console.log('[Proxy] Прокси добавлен:', host);
+        }
+
+        removeProxy(index) {
+            if (index < this.proxies.length) {
+                this.proxies.splice(index, 1);
+                console.log('[Proxy] Прокси удалён');
+            }
+        }
+
+        listProxies() {
+            return this.proxies.map((p, i) => `${i}: ${p.host}:${p.port}`).join('\n');
+        }
+    }
 
     // ==================== OVERLAY LOADER ====================
     function loadOverlay() {
         console.log('[Arras Multibox] Загрузка оверлея...');
         
-        // Создаём модуль оверлея локально
         const overlayCode = `
             (function() {
                 console.log('[Overlay] Инициализация оверлея arras.io');
                 
-                // Захват игровых данных
                 let gameCanvas = null;
                 let gameCtx = null;
                 
                 function captureGameData() {
                     try {
-                        // Пытаемся получить canvas и контекст
                         gameCanvas = document.querySelector('canvas');
                         if (gameCanvas) {
                             gameCtx = gameCanvas.getContext('2d');
@@ -92,14 +224,9 @@
                             ctx: gameCtx,
                             timestamp: Date.now()
                         };
-                    },
-                    
-                    injectStats: function() {
-                        // Инъекция статистики в игру
                     }
                 };
                 
-                // Запустить захват данных когда игра загрузится
                 const checkInterval = setInterval(() => {
                     if (captureGameData()) {
                         clearInterval(checkInterval);
@@ -131,23 +258,17 @@
         }
 
         attachEventListeners() {
-            // Перехват событий мыши
             document.addEventListener('mousemove', (e) => {
                 ARRAS_STATE.mousePos = {
                     x: e.clientX,
                     y: e.clientY
                 };
             });
-
-            document.addEventListener('click', (e) => {
-                // Логирование кликов для отладки
-            });
         }
 
         captureGameState() {
             setInterval(() => {
                 try {
-                    // Попытка получить состояние из window объекта
                     if (window.GAME_STATE) {
                         ARRAS_STATE.playerPos = window.GAME_STATE.playerPos || ARRAS_STATE.playerPos;
                         ARRAS_STATE.health = window.GAME_STATE.health || ARRAS_STATE.health;
@@ -160,22 +281,16 @@
                 }
             }, 100);
         }
-
-        injectGameState(state) {
-            if (!window.GAME_STATE) {
-                window.GAME_STATE = {};
-            }
-            Object.assign(window.GAME_STATE, state);
-        }
     }
 
     // ==================== BOT ENGINE ====================
     class BotEngine {
-        constructor() {
+        constructor(proxyManager) {
             this.isRunning = false;
             this.targetEnemy = null;
             this.lastAttackTime = 0;
-            this.attackCooldown = 100; // ms
+            this.attackCooldown = 100;
+            this.proxyManager = proxyManager;
         }
 
         start() {
@@ -193,32 +308,26 @@
         mainLoop() {
             if (!this.isRunning) return;
 
-            // Auto Attack
             if (ARRAS_CONFIG.AUTO_ATTACK) {
                 this.handleAutoAttack();
             }
 
-            // Auto Pilot
             if (ARRAS_CONFIG.AUTO_PILOT && ARRAS_CONFIG.MODE === 'client') {
                 this.handleAutoPilot();
             }
 
-            // Follow Mouse
             if (ARRAS_CONFIG.FOLLOW_MOUSE && ARRAS_CONFIG.MODE === 'client') {
                 this.handleFollowMouse();
             }
 
-            // Auto Build
             if (ARRAS_CONFIG.AUTO_BUILD) {
                 this.handleAutoBuild();
             }
 
-            // Sync with Host
             if (ARRAS_CONFIG.SYNC_ENABLED) {
                 this.handleSync();
             }
 
-            // Follow Host
             if (ARRAS_CONFIG.FOLLOW_HOST && ARRAS_CONFIG.MODE === 'client') {
                 this.handleFollowHost();
             }
@@ -233,7 +342,6 @@
             const enemies = ARRAS_STATE.enemies;
             if (enemies.length === 0) return;
 
-            // Найти ближайшего врага
             let closestEnemy = null;
             let minDistance = ARRAS_CONFIG.ATTACK_RANGE;
 
@@ -257,14 +365,12 @@
         }
 
         handleAutoPilot() {
-            // Поиск collectibles (еды)
             const collectibles = ARRAS_STATE.collectibles || [];
             
             if (collectibles.length > 0) {
                 const closest = this.findClosest(collectibles, ARRAS_STATE.playerPos);
                 this.moveTowards(closest.x, closest.y);
             } else {
-                // Случайное перемещение
                 this.randomWalk();
             }
         }
@@ -290,7 +396,6 @@
         }
 
         handleAutoBuild() {
-            // Автоматический апгрейд навыков
             const upgradeOrder = ['Health', 'Damage', 'Bullet Speed', 'Fire Rate', 'Reload'];
             
             upgradeOrder.forEach(upgrade => {
@@ -302,7 +407,6 @@
 
         handleSync() {
             if (ARRAS_CONFIG.MODE === 'host') {
-                // Хост передаёт свою позицию
                 GM_setValue('arras_host_position', JSON.stringify({
                     x: ARRAS_STATE.playerPos.x,
                     y: ARRAS_STATE.playerPos.y,
@@ -311,7 +415,6 @@
                     level: ARRAS_STATE.level
                 }));
             } else {
-                // Клиент получает позицию хоста
                 const hostData = GM_getValue('arras_host_position', '{}');
                 try {
                     const parsed = JSON.parse(hostData);
@@ -322,7 +425,6 @@
             }
         }
 
-        // Helper Methods
         moveMouse(x, y) {
             const event = new MouseEvent('mousemove', {
                 clientX: x,
@@ -398,9 +500,10 @@
 
     // ==================== UI PANEL ====================
     class UIPanel {
-        constructor() {
+        constructor(proxyManager) {
             this.panel = null;
             this.isVisible = true;
+            this.proxyManager = proxyManager;
         }
 
         create() {
@@ -420,7 +523,7 @@
                         border: 2px solid #00ff00;
                         border-radius: 6px;
                         z-index: 100000;
-                        min-width: 250px;
+                        min-width: 280px;
                         box-shadow: 0 0 10px rgba(0, 255, 0, 0.5);
                         user-select: none;
                     }
@@ -448,6 +551,14 @@
                     .status-value {
                         color: #00aa00;
                         font-weight: bold;
+                    }
+                    
+                    .proxy-status {
+                        padding: 5px;
+                        background: rgba(0, 255, 0, 0.1);
+                        border-radius: 3px;
+                        font-size: 11px;
+                        margin: 8px 0;
                     }
                     
                     .divider {
@@ -488,10 +599,6 @@
                         cursor: not-allowed;
                     }
                     
-                    .bot-btn.disabled:hover {
-                        box-shadow: none;
-                    }
-                    
                     .info-text {
                         font-size: 10px;
                         color: #00aa00;
@@ -501,7 +608,7 @@
                     }
                 </style>
                 
-                <div class="panel-header">🤖 ARRAS.IO BOT v3.0</div>
+                <div class="panel-header">🤖 ARRAS.IO BOT v3.1 [PROXY]</div>
                 
                 <div class="status-row">
                     <span class="status-label">📍 Mode:</span>
@@ -523,9 +630,9 @@
                     <span class="status-value" id="score-status">0</span>
                 </div>
                 
-                <div class="status-row">
-                    <span class="status-label">🎯 Tank:</span>
-                    <span class="status-value" id="tank-status">-</span>
+                <div class="proxy-status">
+                    🌐 Proxy: <span id="proxy-status" style="color: #ffaa00;">connecting...</span>
+                    <br/>IP: <span id="proxy-ip" style="font-size: 10px;">-</span>
                 </div>
                 
                 <div class="divider"></div>
@@ -540,6 +647,7 @@
                 <div class="button-group">
                     <button class="bot-btn" id="btn-host">👑 HOST</button>
                     <button class="bot-btn" id="btn-follow">👣 FLLW</button>
+                    <button class="bot-btn" id="btn-proxy">🌐 PRXY</button>
                 </div>
                 
                 <div class="info-text">
@@ -559,7 +667,8 @@
                 'btn-build': () => this.toggleConfig('AUTO_BUILD'),
                 'btn-sync': () => this.toggleConfig('SYNC_ENABLED'),
                 'btn-host': () => this.toggleMode(),
-                'btn-follow': () => this.toggleConfig('FOLLOW_HOST')
+                'btn-follow': () => this.toggleConfig('FOLLOW_HOST'),
+                'btn-proxy': () => this.toggleProxy()
             };
 
             Object.entries(handlers).forEach(([id, handler]) => {
@@ -584,6 +693,18 @@
             console.log(`[UI] Mode: ${ARRAS_CONFIG.MODE.toUpperCase()}`);
         }
 
+        toggleProxy() {
+            ARRAS_CONFIG.USE_PROXY = !ARRAS_CONFIG.USE_PROXY;
+            GM_setValue('use_proxy', ARRAS_CONFIG.USE_PROXY);
+            this.updateButtonStates();
+            
+            if (ARRAS_CONFIG.USE_PROXY) {
+                this.proxyManager.connect();
+            }
+            
+            console.log(`[UI] Proxy: ${ARRAS_CONFIG.USE_PROXY}`);
+        }
+
         updateStatus() {
             try {
                 document.getElementById('mode-status').textContent = ARRAS_CONFIG.MODE.toUpperCase();
@@ -591,7 +712,7 @@
                     `${Math.max(0, ARRAS_STATE.health)}/${ARRAS_STATE.maxHealth}`;
                 document.getElementById('level-status').textContent = ARRAS_STATE.level;
                 document.getElementById('score-status').textContent = ARRAS_STATE.score;
-                document.getElementById('tank-status').textContent = ARRAS_STATE.tankType || '-';
+                document.getElementById('proxy-status').textContent = ARRAS_STATE.proxyStatus.toUpperCase();
                 
                 this.updateButtonStates();
             } catch(e) {
@@ -606,7 +727,8 @@
                 'btn-build': ARRAS_CONFIG.AUTO_BUILD,
                 'btn-sync': ARRAS_CONFIG.SYNC_ENABLED,
                 'btn-follow': ARRAS_CONFIG.FOLLOW_HOST,
-                'btn-host': ARRAS_CONFIG.MODE === 'host'
+                'btn-host': ARRAS_CONFIG.MODE === 'host',
+                'btn-proxy': ARRAS_CONFIG.USE_PROXY
             };
 
             Object.entries(buttons).forEach(([id, isEnabled]) => {
@@ -620,23 +742,32 @@
 
     // ==================== INITIALIZATION ====================
     
+    let proxyManager = null;
     let gameInterface = null;
     let botEngine = null;
     let uiPanel = null;
 
-    function initialize() {
-        console.log('[Arras Multibox] Инициализация скрипта...');
+    async function initialize() {
+        console.log('[Arras Multibox] Инициализация скрипта v3.1...');
 
+        // Инициализировать менеджер прокси
+        proxyManager = new ProxyManager();
+        
         // Загрузить оверлей
         loadOverlay();
 
         // Инициализировать компоненты
         gameInterface = new GameInterface();
-        botEngine = new BotEngine();
-        uiPanel = new UIPanel();
+        botEngine = new BotEngine(proxyManager);
+        uiPanel = new UIPanel(proxyManager);
 
         // Создать UI панель
         uiPanel.create();
+
+        // Подключиться к прокси если включён
+        if (ARRAS_CONFIG.USE_PROXY) {
+            await proxyManager.connect();
+        }
 
         // Запустить инициализацию игры
         const initInterval = setInterval(() => {
@@ -644,7 +775,7 @@
                 gameInterface.initialize();
                 botEngine.start();
                 clearInterval(initInterval);
-                console.log('[Arras Multibox] Все компоненты инициализированы');
+                console.log('[Arras Multibox] ✅ Все компоненты инициализированы');
             } catch(e) {
                 console.log('[Arras Multibox] Ожидание загрузки игры...');
             }
@@ -657,10 +788,18 @@
             }
         }, 100);
 
+        // Проверка соединения с прокси каждые 30 секунд
+        setInterval(() => {
+            if (ARRAS_CONFIG.USE_PROXY && !proxyManager.isConnected) {
+                proxyManager.connect();
+            }
+        }, 30000);
+
         // Горячие клавиши
         setupHotkeys();
 
         console.log('[Arras Multibox] ✅ Готово! Режим:', ARRAS_CONFIG.MODE.toUpperCase());
+        console.log('[Arras Multibox] Прокси:', proxyManager.getProxyString());
     }
 
     function setupHotkeys() {
