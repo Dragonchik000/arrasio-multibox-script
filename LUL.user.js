@@ -1,10 +1,12 @@
 // ==UserScript==
 // @name         LUL - Arras.io Multibox Bot Pro
 // @namespace    http://tampermonkey.net/
-// @version      3.2
-// @description  Advanced multibox script with Discord auth, proxy support and auto-attack, auto-pilot, auto-build
+// @version      3.2.1
+// @description  Advanced multibox script with Discord auth, proxy support and auto-attack, auto-pilot, auto-build - ONLY FOR arras.io
 // @author       Dragonchik000
 // @match        https://arras.io/*
+// @exclude      *
+// @include      https://arras.io/*
 // @run-at       document-start
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -18,6 +20,19 @@
 
 (function() {
     'use strict';
+
+    // ==================== SITE VALIDATION ====================
+    // Проверка: скрипт работает ТОЛЬКО на https://arras.io
+    const currentHost = window.location.hostname;
+    const currentProtocol = window.location.protocol;
+    
+    if (currentProtocol !== 'https:' || currentHost !== 'arras.io') {
+        console.log('[LUL Bot] ❌ Скрипт работает ТОЛЬКО на https://arras.io/');
+        console.log('[LUL Bot] Текущий URL:', window.location.href);
+        return; // Останавливаем скрипт на других сайтах
+    }
+
+    console.log('[LUL Bot] ✅ Проверка сайта пройдена. Инициализация...');
 
     // ==================== DISCORD AUTH CONFIG ====================
     const DISCORD_CONFIG = {
@@ -93,7 +108,7 @@
         }
 
         async initialize() {
-            console.log('[Discord] Инициализация авторизации...');
+            console.log('[Discord] Инициализация авторизации на arras.io...');
             
             // Проверить сохранённый токен
             const savedToken = GM_getValue('discord_token', null);
@@ -792,7 +807,7 @@
                     }
                 </style>
                 
-                <div class="panel-header">🤖 LUL BOT v3.2</div>
+                <div class="panel-header">🤖 LUL BOT v3.2.1</div>
                 
                 <div class="auth-info">
                     👤 <span id="auth-user">Загрузка...</span>
@@ -841,7 +856,7 @@
                 
                 <div class="info-text">
                     Hotkeys: Ctrl+Alt+A/P/B/S/H/F<br>
-                    Status: <span id="bot-status">Ready</span>
+                    🔒 Only on arras.io
                 </div>
             `;
 
@@ -943,7 +958,8 @@
     let uiPanel = null;
 
     async function initialize() {
-        console.log('[LUL Bot] Инициализация скрипта v3.2...');
+        console.log('[LUL Bot] Инициализация скрипта v3.2.1...');
+        console.log('[LUL Bot] Сайт: https://arras.io/');
 
         // Инициализировать Discord авторизацию
         discordAuth = new DiscordAuthManager();
@@ -951,7 +967,6 @@
 
         if (!authResult) {
             console.log('[LUL Bot] ⚠️ Авторизация требуется для продолжения');
-            // Создать UI панель для повторной попытки авторизации
         }
 
         // Инициализировать менеджер прокси
